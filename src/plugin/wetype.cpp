@@ -1928,11 +1928,32 @@ public:
            configuredLanguageSwitch)) {
         if (s->vMode)
           cancelVMode(ic);
-        if (!s->preedit.empty())
-          send(ic, "reset");
-        s->preedit.clear();
-        s->cursor = 0;
-        clearDisplayState(s);
+        // Preserve unfinished pinyin when Shift switches to English. The
+        // backend receives this after earlier key requests and retains their
+        // literal text, even before Fcitx receives the latest preedit reply.
+        if (!s->preedit.empty() || s->inputSeq > s->applied) {
+          if (send(ic, "raw")) {
+            // Keep the current preedit visible until the asynchronous raw
+            // commit arrives, and queue later keys behind that commit.
+            s->selectionPending = true;
+            ic->inputPanel().setCandidateList(nullptr);
+          } else {
+            // If the backend cannot be started, do not discard the text we
+            // still have locally. Ignore any late replies from that session.
+            if (!s->preedit.empty())
+              ic->commitString(s->preedit);
+            ++s->epoch;
+            s->selectionPending = false;
+            s->deferredKeys.clear();
+            s->preedit.clear();
+            s->cursor = 0;
+            clearDisplayState(s);
+          }
+        } else {
+          s->preedit.clear();
+          s->cursor = 0;
+          clearDisplayState(s);
+        }
         s->english = !s->english;
         s->symbolAutoState = 0;
         s->modifierCandidate = FcitxKey_None;
