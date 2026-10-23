@@ -21,6 +21,7 @@
 #include <fcitx/inputcontextmanager.h>
 #include <fcitx/inputcontextproperty.h>
 #include <fcitx/inputmethodengine.h>
+#include <fcitx/inputmethodentry.h>
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
 #include <fcitx/statusarea.h>
@@ -272,6 +273,7 @@ class WeType : public InputMethodEngine {
   int read_ = -1, write_ = -1;
   std::unique_ptr<EventSourceIO> reader_, writer_;
   std::unique_ptr<EventSourceTime> timer_;
+  std::unique_ptr<HandlerTableEntry<EventHandler>> languageModifierWatcher_;
   bool ready_ = false, failed_ = false;
   uint64_t activity_ = 0;
   uint64_t restartAt_ = 0, restartBackoff_ = 250000;
@@ -1679,6 +1681,30 @@ public:
                                    &instance_->userInterfaceManager());
     settingsConnection_ = settingsAction_.connect<SimpleAction::Activated>(
         [](InputContext *) { startProcess({WETYPE_SETTINGS}); });
+    // Fcitx's default AltTriggerKeys contains Shift_L and runs before the
+    // engine. Own enabled language modifiers here so unfinished input reaches
+    // our ordered raw-commit path rather than being reset by a global switch.
+    languageModifierWatcher_ = instance_->watchEvent(
+        EventType::InputContextKeyEvent, EventWatcherPhase::PreInputMethod,
+        [this](Event &event) {
+          auto &key = static_cast<KeyEvent &>(event);
+          const auto sym = key.key().sym();
+          const bool enabled =
+              ((sym == FcitxKey_Shift_L || sym == FcitxKey_Shift_R) &&
+               *config_.shortcuts->shiftSwitch) ||
+              ((sym == FcitxKey_Control_L || sym == FcitxKey_Control_R) &&
+               *config_.shortcuts->ctrlSwitch);
+          if (!enabled)
+            return;
+          auto *ic = key.inputContext();
+          auto *entry = instance_->inputMethodEntry(ic);
+          if (!entry || entry->uniqueName() != "wetypex" ||
+              !state(ic)->active ||
+              ic->capabilityFlags().test(CapabilityFlag::Password))
+            return;
+          keyEvent(*entry, key);
+          key.filterAndAccept();
+        });
     timer_ = instance_->eventLoop().addTimeEvent(
         CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + 100000, 0,
         [this](auto *source, uint64_t time) {
@@ -1762,6 +1788,7 @@ public:
     }
   }
   ~WeType() override {
+    languageModifierWatcher_.reset();
     timer_.reset();
     stop();
     stopSync();
